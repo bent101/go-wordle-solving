@@ -3,7 +3,7 @@ package main
 import (
 	"fmt"
 
-	"./hint"
+	"github.com/bent101/go-wordle-solving/hint"
 )
 
 func main() {

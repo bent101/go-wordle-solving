@@ -1,4 +1,4 @@
-package main
+package hint
 
 import (
 	"golang.org/x/exp/slices"
@@ -69,7 +69,7 @@ func New(guess, answer string) *Hint {
 		if slices.Contains(unHintedAtChars, c) {
 			hint.sequence[i] = 1
 			j := slices.Index(unHintedAtChars, c)
-			unHintedAtChars = slices.Remove(unHintedAtChars, j, j+1)
+			unHintedAtChars = slices.Delete(unHintedAtChars, j, j+1)
 		}
 	}
 
