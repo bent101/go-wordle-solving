@@ -1,496 +1,228 @@
 package main
 
 import (
-	"bufio"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"os"
-	"sort"
+	"strconv"
 	"strings"
+	"sync"
+
+	"github.com/schollz/progressbar/v3"
 )
 
-// WordleAnalysis provides comprehensive information about the guess
-type WordleAnalysis struct {
-	Target      string
-	Guess       string
-	LetterInfos map[byte]LetterInfo
+type Hint uint8
+
+type HintInfo struct {
+	freq   int
+	bitvec *Bitvec
 }
 
-// FilterWords returns words from the candidates list that satisfy all the constraints
-func (w WordleAnalysis) FilterWords(candidates []string) []string {
-	var validWords []string
-	for _, word := range candidates {
-		if w.WordSatisfiesConstraints(word) {
-			validWords = append(validWords, word)
-		}
-	}
-	return validWords
+type GuessInfo struct {
+	answerHints map[string]Hint
+	hintsMap    map[Hint]*HintInfo
 }
 
-// WordSatisfiesConstraints checks if a word satisfies all the letter constraints
-func (w WordleAnalysis) WordSatisfiesConstraints(word string) bool {
-	// Count letter frequencies in the candidate word
-	wordFreq := make(map[byte]int)
-	for i := range 5 {
-		wordFreq[word[i]]++
-	}
+var guessesFile, _ = os.ReadFile("io/guesses.txt")
+var answersFile, _ = os.ReadFile("io/answers.txt")
+var guesses = strings.Split(string(guessesFile), "\n")
+var answers = strings.Split(string(answersFile), "\n")
+var guessesMap = map[string]*GuessInfo{}
 
-	// Check each letter constraint
-	for letter, info := range w.LetterInfos {
-		actualFreq := wordFreq[letter]
+func main() {
+	calculateHints()
 
-		if info.FrequencyIsExact {
-			if actualFreq != info.Frequency {
-				return false
-			}
-		} else {
-			if actualFreq < info.Frequency {
-				return false
-			}
-		}
+	calculateBitvecs()
 
-		for _, pos := range info.MustBeInPositions {
-			if word[pos] != letter {
-				return false
-			}
-		}
-
-		for _, pos := range info.CantBeInPositions {
-			if word[pos] == letter {
-				return false
-			}
-		}
-	}
-
-	return true
+	findBestGuess()
 }
 
-func (w WordleAnalysis) String() string {
-	var result strings.Builder
+func calculateHints() {
+	fmt.Println("calculating hints for all guess-answer pairs")
+	bar := progressbar.Default(int64(len(guesses)))
 
-	result.WriteString(fmt.Sprintf("Target: %s, Guess: %s\n", w.Target, w.Guess))
+	var wg sync.WaitGroup
 
-	// Letter constraint analysis
-	result.WriteString("Letter Constraints:\n")
-	for letter, info := range w.LetterInfos {
-		if info.InTarget() {
-			freqStr := fmt.Sprintf("%d", info.Frequency)
-			if !info.FrequencyIsExact {
-				freqStr = "at least " + freqStr
-			}
-			result.WriteString(fmt.Sprintf("  %c: appears %s times", letter, freqStr))
+	for _, guess := range guesses {
+		wg.Add(1)
 
-			if len(info.MustBeInPositions) > 0 {
-				result.WriteString(fmt.Sprintf(" | must be in positions: %v", info.MustBeInPositions))
-			}
-			if len(info.CantBeInPositions) > 0 {
-				result.WriteString(fmt.Sprintf(" | can't be in positions: %v", info.CantBeInPositions))
-			}
+		answerHints := make(map[string]Hint)
+		hintsMap := make(map[Hint]*HintInfo)
 
-			possible := info.PossiblePositions()
-			if len(possible) < 5 && len(info.MustBeInPositions) < info.Frequency {
-				result.WriteString(fmt.Sprintf(" | could be in positions: %v", possible))
-			}
-			result.WriteString("\n")
-		} else {
-			result.WriteString(fmt.Sprintf("  %c: not in target word\n", letter))
+		guessesMap[guess] = &GuessInfo{
+			answerHints,
+			hintsMap,
 		}
+
+		go func() {
+			defer wg.Done()
+			for _, answer := range answers {
+				hint := getHint(guess, answer)
+				answerHints[answer] = hint
+
+				if hintsMap[hint] != nil {
+					hintsMap[hint].freq++
+				} else {
+					hintsMap[hint] = &HintInfo{
+						freq:   1,
+						bitvec: NewBitvec(len(answers)),
+					}
+				}
+			}
+			bar.Add(1)
+		}()
 	}
 
-	return result.String()
+	wg.Wait()
 }
 
-// AnalyzeWordle generates comprehensive Wordle letter information
-func AnalyzeWordle(target, guess string) WordleAnalysis {
-	// Count letter frequencies in target
-	targetFreq := make(map[byte]int)
-	for i := range 5 {
-		targetFreq[target[i]]++
+func calculateBitvecs() {
+	numUniqueHints := 0
+	for _, guessInfo := range guessesMap {
+		numUniqueHints += len(guessInfo.hintsMap)
 	}
 
-	// Initialize letter info for all letters in guess
-	letterInfos := make(map[byte]LetterInfo)
-	for i := range 5 {
-		char := guess[i]
-		if _, exists := letterInfos[char]; !exists {
-			letterInfos[char] = LetterInfo{
-				MustBeInPositions: []int{},
-				CantBeInPositions: []int{},
-				Frequency:         0,
-				FrequencyIsExact:  false,
-			}
-		}
-	}
+	fmt.Println("calculating bitvecs for", numUniqueHints, "unique hints")
+	bar := progressbar.Default(int64(numUniqueHints))
 
-	// Track what we learn from each position
-	usedInstances := make(map[byte]int)
+	var wg sync.WaitGroup
 
-	// First pass: identify correct positions
-	for i := range 5 {
-		guessChar := guess[i]
-		targetChar := target[i]
-		if guessChar == targetChar {
-			usedInstances[guessChar]++
-
-			// Update letter info - we know it must be in this position
-			info := letterInfos[guessChar]
-			info.MustBeInPositions = append(info.MustBeInPositions, i)
-			info.Frequency = max(info.Frequency, usedInstances[guessChar])
-			letterInfos[guessChar] = info
-		}
-	}
-
-	// Second pass: identify wrong positions and frequency constraints
-	for i := range 5 {
-		guessChar := guess[i]
-		targetChar := target[i]
-
-		// Skip if already correct position
-		if guessChar == targetChar {
-			continue
-		}
-
-		targetCount := targetFreq[guessChar]
-		usedCount := usedInstances[guessChar]
-
-		info := letterInfos[guessChar]
-
-		if targetCount == 0 {
-			// Letter not in target at all
-			info.Frequency = 0
-			info.FrequencyIsExact = true
-		} else if usedCount < targetCount {
-			// Letter is in target, wrong position, and we haven't exceeded frequency
-			info.CantBeInPositions = append(info.CantBeInPositions, i)
-			usedInstances[guessChar]++
-			info.Frequency = max(info.Frequency, usedInstances[guessChar])
-		} else {
-			// Letter is in target but we've exceeded frequency - now we know exact count
-			info.CantBeInPositions = append(info.CantBeInPositions, i)
-			info.Frequency = targetCount
-			info.FrequencyIsExact = true
-		}
-
-		letterInfos[guessChar] = info
-	}
-
-	// Mark exact frequency for letters we fully mapped
-	for letter, info := range letterInfos {
-		if !info.FrequencyIsExact && info.Frequency > 0 {
-			if len(info.MustBeInPositions) == info.Frequency {
-				info.FrequencyIsExact = true
-				letterInfos[letter] = info
-			}
-		}
-	}
-
-	return WordleAnalysis{
-		Target:      target,
-		Guess:       guess,
-		LetterInfos: letterInfos,
-	}
-}
-
-// LetterConstraintKey represents a unique constraint for caching
-type LetterConstraintKey struct {
-	Letter byte
-	Info   LetterInfo
-}
-
-func (k LetterConstraintKey) Canonical() string {
-	return fmt.Sprintf("%c:%s", k.Letter, k.Info.Canonical())
-}
-
-func (k LetterConstraintKey) Hash() string {
-	canonical := k.Canonical()
-	hash := sha256.Sum256([]byte(canonical))
-	return hex.EncodeToString(hash[:8])
-}
-
-// PrecomputedConstraints stores bitvectors for all possible letter constraints
-type PrecomputedConstraints struct {
-	Words       []string                       // All candidate words
-	Constraints map[string]*Bitvector          // Key hash -> bitvector
-	KeyMap      map[string]LetterConstraintKey // Hash -> original key for debugging
-}
-
-func LoadWords(filename string) ([]string, error) {
-	file, err := os.Open(filename)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-
-	var words []string
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		word := strings.TrimSpace(scanner.Text())
-		words = append(words, word)
-	}
-
-	return words, scanner.Err()
-}
-
-func TestLetterConstraint(word string, letter byte, info LetterInfo) bool {
-	// Count letter frequency in word
-	freq := 0
-	for i := range 5 {
-		if word[i] == letter {
-			freq++
-		}
-	}
-
-	// Check frequency constraints
-	if info.Frequency == 0 {
-		if freq > 0 {
-			return false
-		}
-	} else {
-		if info.FrequencyIsExact {
-			if freq != info.Frequency {
-				return false
-			}
-		} else {
-			if freq < info.Frequency {
-				return false
-			}
-		}
-	}
-
-	// Check position constraints
-	for _, pos := range info.MustBeInPositions {
-		if word[pos] != letter {
-			return false
-		}
-	}
-
-	for _, pos := range info.CantBeInPositions {
-		if word[pos] == letter {
-			return false
-		}
-	}
-
-	return true
-}
-
-func BuildPrecomputedConstraints(words []string) *PrecomputedConstraints {
-	allInfos := GenerateAllLetterInfos()
-	fmt.Printf("Generated %d valid LetterInfo objects\n", len(allInfos))
-
-	constraints := make(map[string]*Bitvector)
-	keyMap := make(map[string]LetterConstraintKey)
-
-	// Calculate total number of constraints (26 letters × N infos)
-	totalConstraints := len(allInfos) * 26 // All letters
-	processed := 0
-
-	for letter := byte('a'); letter <= byte('z'); letter++ {
-		for _, info := range allInfos {
-			key := LetterConstraintKey{Letter: letter, Info: info}
-			hash := key.Hash()
-
-			// Skip if already processed (duplicate hash)
-			if _, exists := constraints[hash]; exists {
-				continue
-			}
-
-			bv := NewBitvector(len(words))
-			for i, word := range words {
-				if TestLetterConstraint(word, letter, info) {
-					bv.Set(i)
+	for _, guessInfo := range guessesMap {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for hint, hintInfo := range guessInfo.hintsMap {
+				bar.Add(1)
+				for answerIdx, answer := range answers {
+					hint2 := guessInfo.answerHints[answer]
+					if hint2 == hint {
+						hintInfo.bitvec.Set(answerIdx)
+					}
 				}
 			}
 
-			constraints[hash] = bv
-			keyMap[hash] = key
-			processed++
-
-			if processed%100 == 0 {
-				fmt.Printf("Progress: %d/%d constraints (%.1f%%)\n",
-					processed, totalConstraints, float64(processed)*100/float64(totalConstraints))
-			}
-		}
+		}()
 	}
 
-	fmt.Printf("Completed building %d constraint bitvectors\n", len(constraints))
-
-	return &PrecomputedConstraints{
-		Words:       words,
-		Constraints: constraints,
-		KeyMap:      keyMap,
-	}
+	wg.Wait()
 }
 
-func DemoMain() {
-	fmt.Println("=== WORDLE SOLVING DEMO ===")
+func findBestGuess() {
+	fmt.Printf("Finding best guess pair\n")
 
-	// Load word lists
-	guesses, err := LoadWords("io/guesses.txt")
-	if err != nil {
-		fmt.Printf("Error loading guesses: %v\n", err)
-		return
-	}
+	guessBitvecs := []*Bitvec{}
+	filteredGuesses := []string{}
 
-	answers, err := LoadWords("io/answers.txt")
-	if err != nil {
-		fmt.Printf("Error loading answers: %v\n", err)
-		return
-	}
+	for _, guess := range guesses {
+		bitvec := NewBitvec(26)
 
-	fmt.Printf("Loaded %d guesses and %d answers\n", len(guesses), len(answers))
-
-	// Build constraints once
-	fmt.Println("\n=== BUILDING CONSTRAINTS ===")
-	precomputed := BuildPrecomputedConstraints(answers)
-
-	// Performance test using bitvectors
-	fmt.Println("\n=== PERFORMANCE TEST (BITVECTORS) ===")
-
-	validWordsFunc := func(candidates []string, analysis WordleAnalysis) []string {
-		if len(candidates) == 0 {
-			return []string{}
+		for i := range 5 {
+			j := int(guess[i] - 'a')
+			bitvec.Set(j)
 		}
 
-		// Start with all candidates
-		result := NewBitvector(len(candidates))
-		for i := 0; i < len(candidates); i++ {
-			result.Set(i)
+		if bitvec.Count == 5 {
+			guessBitvecs = append(guessBitvecs, bitvec)
+			filteredGuesses = append(filteredGuesses, guess)
 		}
+	}
 
-		// Apply each constraint
-		for letter, info := range analysis.LetterInfos {
-			key := LetterConstraintKey{Letter: letter, Info: info}
-			hash := key.Hash()
+	totalPairs := int64(len(filteredGuesses) * (len(filteredGuesses) - 1) / 2)
+	fmt.Printf("filtered down to %v guesses with 5 unique letters (%v pairs)\n", len(filteredGuesses), totalPairs)
 
-			if bv, exists := precomputed.Constraints[hash]; exists {
-				result = result.And(bv)
+	bar := progressbar.Default(totalPairs)
+
+	bestGuess1 := filteredGuesses[0]
+	bestGuess2 := filteredGuesses[1]
+	bestGuessVal := AvgNumCandidates(bestGuess1, bestGuess2)
+
+	mu := sync.Mutex{}
+	wg := sync.WaitGroup{}
+
+	for i := range len(filteredGuesses) - 1 {
+		go func() {
+			for j := i + 1; j < len(filteredGuesses); j++ {
+				guess1 := filteredGuesses[i]
+				guess2 := filteredGuesses[j]
+
+				if guessBitvecs[i].And(guessBitvecs[j]).Count != 0 {
+					bar.Add(1)
+					continue
+				}
+
+				wg.Add(1)
+				guessVal := AvgNumCandidates(guess1, guess2)
+				mu.Lock()
+				if guessVal < bestGuessVal {
+					bestGuess1 = guess1
+					bestGuess2 = guess2
+					bestGuessVal = guessVal
+					bar.Describe(fmt.Sprintf("Best: %v, %v (%.2f)", bestGuess1, bestGuess2, bestGuessVal))
+				}
+				mu.Unlock()
+				wg.Done()
+				bar.Add(1)
 			}
-		}
-
-		// Convert back to word list
-		validWords := make([]string, 0)
-		for _, idx := range result.GetSetIndices() {
-			if idx < len(candidates) {
-				validWords = append(validWords, candidates[idx])
-			}
-		}
-
-		return validWords
+		}()
 	}
 
-	// Test equivalence
-	candidates := answers
-	example := AnalyzeWordle("crane", "audio")
-	traditionalValid := example.FilterWords(candidates)
-	bitvectorValid := validWordsFunc(candidates, example)
+	wg.Wait()
 
-	sort.Strings(traditionalValid)
-	sort.Strings(bitvectorValid)
+	fmt.Printf("Done, best guess pair: %v, %v (%.2f)\n", bestGuess1, bestGuess2, bestGuessVal)
+}
 
-	match := len(bitvectorValid) == len(traditionalValid)
-	if match {
-		for i, word := range bitvectorValid {
-			if i >= len(traditionalValid) || word != traditionalValid[i] {
-				match = false
+func getHint(guess, answer string) Hint {
+	var charHints [5]uint8
+
+	for i, ch := range guess {
+		if answer[i] == byte(ch) {
+			charHints[i] = 2
+		} else if strings.ContainsRune(answer, ch) {
+			charHints[i] = 1
+		}
+	}
+
+	var ret uint8
+	for _, d := range charHints {
+		ret = (ret * 3) + d
+	}
+
+	return Hint(ret)
+}
+
+func lookupBitvec(guess, answer string) *Bitvec {
+	answerHints := guessesMap[guess].answerHints
+	hintsMap := guessesMap[guess].hintsMap
+	return hintsMap[answerHints[answer]].bitvec
+}
+
+func (h Hint) String() string {
+	hintReplacer := strings.NewReplacer("0", "⬜", "1", "🟨", "2", "🟩")
+	base3Str := strconv.FormatUint(uint64(h), 3)
+	paddedBase3Str := fmt.Sprintf("%05s", base3Str)
+
+	return hintReplacer.Replace(paddedBase3Str)
+}
+
+func AvgNumCandidates(firstGuess string, guesses ...string) float64 {
+	var tot float64
+
+	for _, answer := range answers {
+		bitvec := lookupBitvec(firstGuess, answer)
+		broke := false
+
+		for _, guess := range guesses {
+			if bitvec.Count <= 2 {
+				broke = true
+				tot += 1.0
 				break
 			}
+			bitvec = bitvec.And(lookupBitvec(guess, answer))
+		}
+
+		if !broke {
+			tot += float64(bitvec.Count)
 		}
 	}
 
-	if match {
-		fmt.Printf("✓ Bitvector method matches traditional method\n")
-	} else {
-		fmt.Printf("✗ Bitvector method differs from traditional method\n")
-	}
-
-	// Performance summary
-	fmt.Printf("\n=== PERFORMANCE SUMMARY ===\n")
-	fmt.Printf("- Total constraints precomputed: %d\n", len(precomputed.Constraints))
-	fmt.Printf("- Total candidate words: %d\n", len(candidates))
-	fmt.Printf("- Words remaining after filtering: %d\n", len(bitvectorValid))
-	fmt.Printf("- Reduction: %.1f%%\n", 100.0*(1.0-float64(len(bitvectorValid))/float64(len(candidates))))
-}
-
-func FindBestStartingWord(guesses, answers []string) (string, float64) {
-	fmt.Printf("Testing %d guesses against %d answers...\n", len(guesses), len(answers))
-
-	bestGuess := ""
-	bestAverage := float64(len(answers)) // Start with worst case
-
-	for guessIdx, guess := range guesses {
-		totalRemaining := 0
-
-		if (guessIdx+1)%100 == 0 {
-			fmt.Printf("Progress: %d/%d (%.1f%%)\n",
-				guessIdx, len(guesses), float64(guessIdx)*100/float64(len(guesses)))
-		}
-
-		for _, answer := range answers {
-			analysis := AnalyzeWordle(answer, guess)
-			validWords := analysis.FilterWords(answers)
-			totalRemaining += len(validWords)
-		}
-
-		average := float64(totalRemaining) / float64(len(answers))
-
-		if average < bestAverage {
-			bestAverage = average
-			bestGuess = guess
-		}
-	}
-
-	return bestGuess, bestAverage
-}
-
-func main() {
-	if len(os.Args) > 1 {
-		switch os.Args[1] {
-		case "demo":
-			DemoMain()
-		case "best":
-			BestWordMain()
-		case "precompute":
-			PrecomputeMain()
-		default:
-			fmt.Println("Usage: go run . [demo|best|precompute]")
-		}
-	} else {
-		DemoMain()
-	}
-}
-
-func BestWordMain() {
-	fmt.Println("=== FINDING BEST STARTING WORD ===")
-
-	// Load word lists
-	guesses, err := LoadWords("io/guesses.txt")
-	if err != nil {
-		fmt.Printf("Error loading guesses: %v\n", err)
-		return
-	}
-
-	answers, err := LoadWords("io/answers.txt")
-	if err != nil {
-		fmt.Printf("Error loading answers: %v\n", err)
-		return
-	}
-
-	fmt.Printf("Loaded %d guesses and %d answers\n", len(guesses), len(answers))
-
-	bestGuess, bestAverage := FindBestStartingWord(guesses, answers)
-
-	fmt.Printf("\n=== RESULTS ===\n")
-	fmt.Printf("Best starting word: %s\n", bestGuess)
-	fmt.Printf("Average remaining words: %.2f\n", bestAverage)
-	fmt.Printf("Average reduction: %.1f%%\n", 100.0*(1.0-bestAverage/float64(len(answers))))
-
-	fmt.Printf("\nTesting with example answers:\n")
-	examples := []string{answers[0], answers[len(answers)/4], answers[len(answers)/2], answers[3*len(answers)/4], answers[len(answers)-1]}
-	for _, answer := range examples {
-		analysis := AnalyzeWordle(answer, bestGuess)
-		validWords := analysis.FilterWords(answers)
-		fmt.Printf("Answer: %s → %d remaining (%.1f%% reduction)\n",
-			answer, len(validWords), 100.0*(1.0-float64(len(validWords))/float64(len(answers))))
-	}
+	return tot / float64(len(answers))
 }

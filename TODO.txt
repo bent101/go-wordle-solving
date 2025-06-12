@@ -1,0 +1,24 @@
+charhints:
+	precompute the bitvec of every charhint -- O(1)
+	use that to precompute the bitvec of every possible guess-answer pair -- O(HA) < O(GAA)
+	use that to order second guesses best to worst for each first guess
+		except maybe we need to do that for each charhint
+		we will partition by charhints
+
+no charhints or hint → filter:
+	compute every hint (guess, answer, and color seq)
+		need to be able to iterate unique hints per guess (and have frequencies)
+		need to be able to look up hints by guess & answer, ideally guess first
+	compute hint bitvecs (lookup the hint for each candidate answer against the current guess)
+	compute guess → guess bitvecs
+
+end goal:
+	experiment with ways of partitioning turn 1 hints
+	engine will find optimal second and third words for each partition
+
+notes:
+	second/third words should take into account the fact that you will only use them when there are >2 possible words
+	guess2 is only useful iff guess1 & guess2 < guess1
+		could precompute this
+	first word depends on strategy
+	use heuristics/evolutionary algorithm
