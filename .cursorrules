@@ -1,0 +1,6 @@
+When I say "hint", I actually mean LetterInfo objects (complete wordle hints are composed of multiple LetterInfo objects).
+
+Use the latest Go features including min, max, and range over numbers (e.g. `for i in range 5`)
+
+Assume all words are of length 5 and are all lowercase a-z (dont validate)
+
