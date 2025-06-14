@@ -1,4 +1,4 @@
-package main
+package handler
 
 import (
 	"fmt"
@@ -133,7 +133,7 @@ func findBestGuess() {
 
 	bestGuess1 := filteredGuesses[0]
 	bestGuess2 := filteredGuesses[1]
-	bestGuessVal := AvgNumCandidates(bestGuess1, bestGuess2)
+	bestGuessVal := MaxNumCandidates(bestGuess1, bestGuess2)
 
 	mu := sync.Mutex{}
 	wg := sync.WaitGroup{}
@@ -150,13 +150,13 @@ func findBestGuess() {
 				}
 
 				wg.Add(1)
-				guessVal := AvgNumCandidates(guess1, guess2)
+				guessVal := MaxNumCandidates(guess1, guess2)
 				mu.Lock()
 				if guessVal < bestGuessVal {
 					bestGuess1 = guess1
 					bestGuess2 = guess2
 					bestGuessVal = guessVal
-					bar.Describe(fmt.Sprintf("Best: %v, %v (%.2f)", bestGuess1, bestGuess2, bestGuessVal))
+					bar.Describe(fmt.Sprintf("Best: %v, %v (%v)", bestGuess1, bestGuess2, bestGuessVal))
 				}
 				mu.Unlock()
 				wg.Done()
@@ -167,7 +167,7 @@ func findBestGuess() {
 
 	wg.Wait()
 
-	fmt.Printf("Done, best guess pair: %v, %v (%.2f)\n", bestGuess1, bestGuess2, bestGuessVal)
+	fmt.Printf("Done, best guess pair: %v, %v (%v)\n", bestGuess1, bestGuess2, bestGuessVal)
 }
 
 func getHint(guess, answer string) Hint {
@@ -204,7 +204,7 @@ func (h Hint) String() string {
 }
 
 func AvgNumCandidates(firstGuess string, guesses ...string) float64 {
-	var tot float64
+	tot := 0.0
 
 	for _, answer := range answers {
 		bitvec := lookupBitvec(firstGuess, answer)
@@ -225,4 +225,28 @@ func AvgNumCandidates(firstGuess string, guesses ...string) float64 {
 	}
 
 	return tot / float64(len(answers))
+}
+
+func MaxNumCandidates(firstGuess string, guesses ...string) int {
+	ret := 1
+
+	for _, answer := range answers {
+		bitvec := lookupBitvec(firstGuess, answer)
+		broke := false
+
+		for _, guess := range guesses {
+			if bitvec.Count <= 2 {
+				broke = true
+				ret = max(ret, 1)
+				break
+			}
+			bitvec = bitvec.And(lookupBitvec(guess, answer))
+		}
+
+		if !broke {
+			ret = max(ret, bitvec.Count)
+		}
+	}
+
+	return ret
 }
