@@ -1,11 +1,14 @@
 package main
 
 import (
+	"encoding/gob"
 	"fmt"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/schollz/progressbar/v3"
 )
@@ -13,27 +16,81 @@ import (
 type Hint uint8
 
 type HintInfo struct {
-	freq   int
-	bitvec *Bitvec
+	Bitvec *Bitvec
 }
 
 type GuessInfo struct {
-	answerHints map[string]Hint
-	hintsMap    map[Hint]*HintInfo
+	AnswerHints map[string]Hint
+	HintsMap    map[Hint]*HintInfo
 }
 
 var guessesFile, _ = os.ReadFile("io/guesses.txt")
 var answersFile, _ = os.ReadFile("io/answers.txt")
 var guesses = strings.Split(string(guessesFile), "\n")
 var answers = strings.Split(string(answersFile), "\n")
-var guessesMap = map[string]*GuessInfo{}
+
+// load guessesMap from disk if possible
+var guessesMap = loadGuessesMap()
+
+func loadGuessesMap() map[string]*GuessInfo {
+	file, err := os.Open("guesses_cache.gob")
+	if err != nil {
+		fmt.Println("Cache file not found, will calculate from scratch")
+		return map[string]*GuessInfo{}
+	}
+	defer file.Close()
+
+	start := time.Now()
+
+	var guessesMap map[string]*GuessInfo
+	decoder := gob.NewDecoder(file)
+	err = decoder.Decode(&guessesMap)
+	if err != nil {
+		fmt.Println("Error decoding cache, will recalculate:", err)
+		return map[string]*GuessInfo{}
+	}
+
+	fmt.Printf("Loaded guesses cache with %d entries in %v\n", len(guessesMap), time.Since(start))
+	return guessesMap
+}
+
+func saveGuessesMap() {
+	file, err := os.Create("guesses_cache.gob")
+	if err != nil {
+		fmt.Println("Error creating cache file:", err)
+		return
+	}
+	defer file.Close()
+
+	start := time.Now()
+
+	encoder := gob.NewEncoder(file)
+	err = encoder.Encode(guessesMap)
+	if err != nil {
+		fmt.Println("Error encoding cache:", err)
+		return
+	}
+
+	fmt.Printf("Saved guesses cache to disk in %v\n", time.Since(start))
+}
 
 func main() {
-	calculateHints()
+	// run these functions if guessesMap was not loaded from disk
+	if len(guessesMap) == 0 {
+		calculateHints()
+		calculateBitvecs()
+		// calculateHintGuesses()
+		// save guessesMap to disk if needed
+		saveGuessesMap()
+	}
 
-	calculateBitvecs()
+	printWordHints("roate")
 
-	findBestGuess()
+	// findBestGuess()
+}
+
+func calculateHintGuesses() {
+	panic("unimplemented")
 }
 
 func calculateHints() {
@@ -43,8 +100,6 @@ func calculateHints() {
 	var wg sync.WaitGroup
 
 	for _, guess := range guesses {
-		wg.Add(1)
-
 		answerHints := make(map[string]Hint)
 		hintsMap := make(map[Hint]*HintInfo)
 
@@ -53,18 +108,17 @@ func calculateHints() {
 			hintsMap,
 		}
 
+		wg.Add(1)
+
 		go func() {
 			defer wg.Done()
 			for _, answer := range answers {
 				hint := getHint(guess, answer)
 				answerHints[answer] = hint
 
-				if hintsMap[hint] != nil {
-					hintsMap[hint].freq++
-				} else {
+				if hintsMap[hint] == nil {
 					hintsMap[hint] = &HintInfo{
-						freq:   1,
-						bitvec: NewBitvec(len(answers)),
+						Bitvec: NewBitvec(len(answers)),
 					}
 				}
 			}
@@ -78,7 +132,7 @@ func calculateHints() {
 func calculateBitvecs() {
 	numUniqueHints := 0
 	for _, guessInfo := range guessesMap {
-		numUniqueHints += len(guessInfo.hintsMap)
+		numUniqueHints += len(guessInfo.HintsMap)
 	}
 
 	fmt.Println("calculating bitvecs for", numUniqueHints, "unique hints")
@@ -90,12 +144,12 @@ func calculateBitvecs() {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for hint, hintInfo := range guessInfo.hintsMap {
+			for hint, hintInfo := range guessInfo.HintsMap {
 				bar.Add(1)
 				for answerIdx, answer := range answers {
-					hint2 := guessInfo.answerHints[answer]
+					hint2 := guessInfo.AnswerHints[answer]
 					if hint2 == hint {
-						hintInfo.bitvec.Set(answerIdx)
+						hintInfo.Bitvec.Set(answerIdx)
 					}
 				}
 			}
@@ -139,7 +193,9 @@ func findBestGuess() {
 	wg := sync.WaitGroup{}
 
 	for i := range len(filteredGuesses) - 1 {
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			for j := i + 1; j < len(filteredGuesses); j++ {
 				guess1 := filteredGuesses[i]
 				guess2 := filteredGuesses[j]
@@ -149,7 +205,6 @@ func findBestGuess() {
 					continue
 				}
 
-				wg.Add(1)
 				guessVal := AvgNumCandidates(guess1, guess2)
 				mu.Lock()
 				if guessVal < bestGuessVal {
@@ -159,7 +214,6 @@ func findBestGuess() {
 					bar.Describe(fmt.Sprintf("Best: %v, %v (%.2f)", bestGuess1, bestGuess2, bestGuessVal))
 				}
 				mu.Unlock()
-				wg.Done()
 				bar.Add(1)
 			}
 		}()
@@ -190,9 +244,9 @@ func getHint(guess, answer string) Hint {
 }
 
 func lookupBitvec(guess, answer string) *Bitvec {
-	answerHints := guessesMap[guess].answerHints
-	hintsMap := guessesMap[guess].hintsMap
-	return hintsMap[answerHints[answer]].bitvec
+	answerHints := guessesMap[guess].AnswerHints
+	hintsMap := guessesMap[guess].HintsMap
+	return hintsMap[answerHints[answer]].Bitvec
 }
 
 func (h Hint) String() string {
@@ -201,6 +255,46 @@ func (h Hint) String() string {
 	paddedBase3Str := fmt.Sprintf("%05s", base3Str)
 
 	return hintReplacer.Replace(paddedBase3Str)
+}
+
+// ColoredWord displays a word with colored backgrounds based on the hint
+func (h Hint) ColoredWord(word string) string {
+	if len(word) != 5 {
+		return word // Return unchanged if not 5 characters
+	}
+
+	// ANSI color codes
+	const (
+		reset    = "\033[0m"
+		grayBg   = "\033[48;5;236m\033[38;5;255m" // gray background, white text
+		yellowBg = "\033[43m\033[30m"             // yellow background, black text
+		greenBg  = "\033[42m\033[30m"             // green background, black text
+	)
+
+	// Convert hint back to individual digits
+	hintValue := uint64(h)
+	var digits [5]int
+	for i := 4; i >= 0; i-- {
+		digits[i] = int(hintValue % 3)
+		hintValue /= 3
+	}
+
+	var result strings.Builder
+	for i, char := range word {
+		switch digits[i] {
+		case 0: // No match
+			result.WriteString(grayBg)
+		case 1: // Wrong position
+			result.WriteString(yellowBg)
+		case 2: // Correct position
+			result.WriteString(greenBg)
+		}
+		result.WriteRune(char)
+		result.WriteString(" ") // Add space between letters
+		result.WriteString(reset)
+	}
+
+	return result.String()
 }
 
 func AvgNumCandidates(firstGuess string, guesses ...string) float64 {
@@ -225,4 +319,26 @@ func AvgNumCandidates(firstGuess string, guesses ...string) float64 {
 	}
 
 	return tot / float64(len(answers))
+}
+
+func printWordHints(word string) {
+	type HintCount struct {
+		hint  Hint
+		count int
+	}
+
+	var hintCounts []HintCount
+	for hint, hintInfo := range guessesMap[word].HintsMap {
+		hintCounts = append(hintCounts, HintCount{hint, hintInfo.Bitvec.Count})
+	}
+
+	// Sort by count in descending order (high to low)
+	sort.Slice(hintCounts, func(i, j int) bool {
+		return hintCounts[i].count > hintCounts[j].count
+	})
+
+	// Print sorted results
+	for _, hc := range hintCounts {
+		fmt.Println(hc.hint.ColoredWord(word), hc.count)
+	}
 }

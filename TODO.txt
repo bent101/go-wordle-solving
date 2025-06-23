@@ -22,3 +22,11 @@ notes:
 		could precompute this
 	first word depends on strategy
 	use heuristics/evolutionary algorithm
+	first guess hints partition the answer set
+
+	for each strategy (track best):
+		for each first guesses (track best):
+			for each hint subset in the partition:
+				iterate over the answer subset that created the hint subset
+				find the best guess
+				can we avoid trying every guess against every answer separately
