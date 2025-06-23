@@ -1,0 +1,2 @@
+# Ignore .gob files (Go binary format cache files)
+*.gob 
